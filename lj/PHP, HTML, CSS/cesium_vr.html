@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <!-- Use correct character set. -->
+    <meta charset="utf-8" />
+    <!-- Tell IE to use the latest, best version. -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <!-- Make the application on mobile take up the full browser screen and disable user scaling. -->
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no" />
+    <title>Cesium WebXR Demo</title>
+    <script src="../Build/Cesium/Cesium.js"></script>
+    <style>
+        @import url(../Build/Cesium/Widgets/widgets.css);
+
+        html,
+        body,
+        #cesiumContainer {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        .cesium-viewer-vrContainer {
+            z-index: 10000;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="cesiumContainer"></div>
+    <script>
+        // Cesium.Ion.defaultAccessToken = 'YOUR_CESIUM_ION_ACCESS_TOKEN';
+
+        // 1. Initialize Cesium Viewer
+        const viewer = new Cesium.Viewer("cesiumContainer", {
+            vrButton: true // Enable the VR button widget
+        });
+
+        let gl, refSpace, xrSession, animationFrameRequestID;
+        let originalDirection; // Store camera direction before entering VR
+
+        let lastTransMatrix = Cesium.Matrix4.IDENTITY.clone(); // Store the last frame's matrix for delta calculations
+
+        // 2. Add listener to Cesium's VR button command
+        viewer.vrButton.viewModel.command.afterExecute.addEventListener(() => {
+            // Entering VR mode
+            if (viewer.vrButton.viewModel.isVRMode) {
+                setTimeout(() => {
+                    // Check if the browser supports WebXR
+                    if (navigator.xr) {
+                        navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+                            if (supported) {
+                                // Request an immersive VR session
+                                navigator.xr.requestSession('immersive-vr').then(sessionStarted);
+                                originalDirection = viewer.camera.direction.clone();
+                            } else {
+                                console.error("immersive-vr mode is not supported by this device.");
+                            }
+                        }).catch((err) => {
+                            console.error("Error checking for VR session support:", err);
+                        });
+                    } else {
+                        console.error("This browser does not support WebXR.");
+                    }
+                }, 200);
+            } else {
+                // Exiting VR mode
+                if (xrSession) {
+                    xrSession.end();
+                }
+            }
+        });
+
+        /**
+         * Callback function when the VR session has started.
+         * @param {XRSession} session The newly started WebXR session.
+         */
+        function sessionStarted(session) {
+            xrSession = session;
+            xrSession.addEventListener("end", sessionEnded);
+
+            // Get the WebGL context from Cesium's canvas and make it XR compatible
+            gl = viewer.scene.canvas.getContext('webgl', { xrCompatible: true });
+            // Note: The call to gl.makeXRCompatible() is now implicitly handled by WebXR
+
+            // Set the session's base layer for rendering
+            session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+
+            // Request a reference space for tracking. 'local' tracks the user's head rotation and position
+            // relative to their starting point.
+            session.requestReferenceSpace('local').then(s => {
+                refSpace = s;
+                // Start the rendering loop
+                session.requestAnimationFrame(onXRFrame);
+            });
+        }
+
+        /**
+         * Callback function when the VR session has ended.
+         */
+        function sessionEnded() {
+            if (animationFrameRequestID) {
+                xrSession.cancelAnimationFrame(animationFrameRequestID);
+                animationFrameRequestID = 0;
+            }
+            xrSession = null;
+            // Restore non-VR rendering if needed
+        }
+
+        /**
+         * The main rendering loop for the VR session.
+         * @param {DOMHighResTimeStamp} time The current time.
+         * @param {XRFrame} frame The current frame information from the WebXR device.
+         */
+        function onXRFrame(time, frame) {
+            const session = frame.session;
+            animationFrameRequestID = session.requestAnimationFrame(onXRFrame);
+
+            const pose = frame.getViewerPose(refSpace);
+            if (!pose) return; // Skip frame if pose is not available
+
+            let glLayer = session.renderState.baseLayer;
+
+            // Bind the WebGL layer's framebuffer
+            gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
+            gl.clearColor(0, 0, 0, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+            // Process each view (eye)
+            pose.views.forEach(view => {
+                let viewport = glLayer.getViewport(view);
+                gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+
+                // For this example, we'll only use the left eye's transform to control the main camera.
+                // A full stereoscopic implementation would require rendering the scene twice with
+                // different projection and view matrices.
+                if (view.eye === 'left') {
+                    // Get the view matrix from the VR device
+                    const viewMatrix = Cesium.Matrix4.fromRowMajorArray(
+                        view.transform.inverse.matrix, new Cesium.Matrix4()
+                    );
+
+                    // --- Logic to apply rotational delta ---
+                    // This logic calculates the change in rotation from the last frame and applies it
+                    // to the Cesium camera, avoiding issues with resetting the camera's position.
+
+                    // Get inverse of the last frame's matrix
+                    const lastTransMatrixInverse = Cesium.Matrix4.inverse(lastTransMatrix, new Cesium.Matrix4());
+
+                    // Calculate the delta transformation between this frame and the last frame
+                    const deltaMatrix = Cesium.Matrix4.multiply(viewMatrix, lastTransMatrixInverse, new Cesium.Matrix4());
+
+                    // Apply this delta to the current camera direction
+                    const resultDirection = Cesium.Matrix4.multiplyByPointAsVector(
+                        deltaMatrix,
+                        viewer.camera.direction,
+                        new Cesium.Cartesian3()
+                    );
+
+                    viewer.camera.direction = resultDirection;
+
+                    // Also apply to the up vector to handle head tilt
+                    const resultUp = Cesium.Matrix4.multiplyByPointAsVector(
+                        deltaMatrix,
+                        viewer.camera.up,
+                        new Cesium.Cartesian3()
+                    );
+                    viewer.camera.up = resultUp;
+
+                    // Save the current matrix for the next frame's calculation
+                    lastTransMatrix = viewMatrix.clone();
+                }
+            });
+
+            // Render the Cesium scene. Cesium will use its camera state that we just updated.
+            viewer.scene.render();
+        }
+
+    </script>
+</body>
+
+</html>

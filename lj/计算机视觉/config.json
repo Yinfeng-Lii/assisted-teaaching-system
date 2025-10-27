@@ -1,0 +1,14 @@
+{
+    "baidu_asr": {
+        "app_id": "YOUR_BAIDU_APP_ID",
+        "app_key": "YOUR_BAIDU_API_KEY",
+        "secret_key": "YOUR_BAIDU_SECRET_KEY"
+    },
+    "hx_model": {
+        "app_id": "YOUR_XUNFEI_APP_ID",
+        "api_secret": "YOUR_XUNFEI_API_SECRET",
+        "api_key": "YOUR_XUNFEI_API_KEY",
+        "domain": "generalv3.5",
+        "ws_url": "wss://spark-api.xf-yun.com/v3.5/chat"
+    }
+}
